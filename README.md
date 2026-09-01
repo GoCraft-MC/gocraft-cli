@@ -7,6 +7,18 @@ Builds and validates plugin bundles for the
 go install github.com/GoCraft-MC/gocraft-cli@latest
 ```
 
+Or download a binary — no Go toolchain needed, which is how the Gradle plugin
+gets it:
+
+```
+https://github.com/GoCraft-MC/gocraft-cli/releases/download/<tag>/gocraft-cli_<tag>_<os>_<arch>
+```
+
+`<os>` is `linux`, `darwin` or `windows` and `<arch>` is `amd64` or `arm64`;
+Windows adds `.exe`. Each release also carries `checksums.txt`. That naming is a
+contract — it is constructed by whoever downloads, so it does not change without
+them.
+
 ```sh
 gocraft-cli validate ./my-plugin              # check plugin.toml
 gocraft-cli build -o my-plugin.gcpkg ./my-plugin

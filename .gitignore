@@ -1,2 +1,5 @@
 # The binary, when built without -o.
 gocraft-cli
+
+# Where the release workflow stages its output.
+dist/
