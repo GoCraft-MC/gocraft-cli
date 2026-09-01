@@ -2,7 +2,7 @@ module github.com/GoCraft-MC/gocraft-cli
 
 go 1.26.0
 
-require github.com/GoCraft-MC/gocraft-abi v0.2.1-0.20260901135001-5a8ed28a84c4
+require github.com/GoCraft-MC/gocraft-abi v0.3.0
 
 require (
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
