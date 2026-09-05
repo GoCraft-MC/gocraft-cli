@@ -224,10 +224,9 @@ func writeGoSubscribe(out *lines, chosen names, name string, fields []resolved) 
 	out.blank()
 	out.add("// On%s registers a handler for %s events.", name, name)
 	out.add("//")
-	out.add("// What the handler writes into a mutable field travels back to the emitter.")
-	out.add("// A scalar is compared first, so an untouched one costs nothing; anything")
-	out.add("// richer is sent as it stands, since comparing it would cost more than the")
-	out.add("// mutation it would save.")
+	out.add("// What the handler changed travels back to the emitter, however deep it")
+	out.add("// reached: one line of a purchase discounted sends that line, not the list")
+	out.add("// it sits in. A field nobody touched sends nothing.")
 	out.add("func On%s(events *gocraft.Events, handler func(*%s, gocraft.EventControl)) error {",
 		name, name)
 	out.add("\treturn events.OnCustom(%sType, func(dispatch *gocraft.CustomDispatch, "+
@@ -245,54 +244,15 @@ func writeGoSubscribe(out *lines, chosen names, name string, fields []resolved) 
 		writeGoDecode(out, chosen, field.Type, "value", target, 3)
 		out.add("\t\t}")
 	}
-	// Remembered before the handler runs, so a scalar it did not touch is not
-	// reported as a change.
-	for index, field := range fields {
-		if !field.Mutable || field.Type.List || field.Type.Record {
-			continue
-		}
-		if field.Type.Element == gcpkg.TypePlayerRef || field.Type.Element == gcpkg.ScalarBytes {
-			continue
-		}
-		out.add("\t\tbefore%d := event.%s", index, identifier(field.Name))
-	}
 	out.add("\t\thandler(&event, control)")
-	for index, field := range fields {
-		if !field.Mutable {
-			continue
-		}
-		comparable := !field.Type.List && !field.Type.Record &&
-			field.Type.Element != gcpkg.TypePlayerRef && field.Type.Element != gcpkg.ScalarBytes
-		indent := "\t\t"
-		if comparable {
-			out.add("\t\tif event.%s != before%d {", identifier(field.Name), index)
-			indent = "\t\t\t"
-		}
-		writeGoWriteBack(out, chosen, field, index, indent)
-		if comparable {
-			out.add("\t\t}")
-		}
-	}
+	// One call, and it reaches as deep as the change did. This used to compare
+	// each mutable field at the top level, so a subscriber that changed a record
+	// inside a list sent nothing at all — while the host would have taken the
+	// write, a path of more than one index being answered by the field existing
+	// rather than by its own mutability.
+	out.add("\t\t_ = dispatch.Update(event.Fields())")
 	out.add("\t})")
 	out.add("}")
-}
-
-// writeGoWriteBack sends one changed field back through the dispatch.
-func writeGoWriteBack(out *lines, chosen names, field resolved, index int, indent string) {
-	source := "event." + identifier(field.Name)
-	if field.Type.List {
-		local := lowerFirst(identifier(field.Name)) + "Changed"
-		element := gcpkg.FieldType{Element: field.Type.Element, Record: field.Type.Record}
-		out.add("%s%s := make([]gocraft.Value, 0, len(%s))", indent, local, source)
-		out.add("%sfor _, item := range %s {", indent, source)
-		out.add("%s\t%s = append(%s, %s)", indent, local, local,
-			goEncode(chosen, element, "item"))
-		out.add("%s}", indent)
-		out.add("%s_ = dispatch.Set(%d, gocraft.List(%s...))", indent, index, local)
-		return
-	}
-	out.add("%s_ = dispatch.Set(%d, %s)", indent, index,
-		goEncode(chosen, field.Type, source))
 }
 
 // writeGoDecode reads one value into a target.

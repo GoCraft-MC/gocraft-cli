@@ -101,10 +101,11 @@ func TestGeneratedGoCarriesTheWholeShape(t *testing.T) {
 	if !strings.Contains(source, "dispatch.Player(0)") {
 		t.Fatalf("the player was not read from the dispatch:\n%s", source)
 	}
-	// A mutable scalar is compared before it is sent back, so an untouched one
-	// costs no mutation.
-	if !strings.Contains(source, "if event.Price != before2 {") {
-		t.Fatalf("a mutable field is written back unconditionally:\n%s", source)
+	// What the handler changed travels back however deep it reached, and a field
+	// nobody touched sends nothing. Comparing each mutable field at the top
+	// level missed a record changed inside a list entirely.
+	if !strings.Contains(source, "_ = dispatch.Update(event.Fields())") {
+		t.Fatalf("the write-back is not the deep one:\n%s", source)
 	}
 	if !strings.Contains(source, "func OnPurchase(events *gocraft.Events") {
 		t.Fatalf("no typed subscription:\n%s", source)
