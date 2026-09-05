@@ -1,5 +1,8 @@
-# The binary, when built without -o.
+# The binary, when built without -o. Both spellings: Windows adds the
+# extension, and a rule for one of them leaves the other to be committed by
+# somebody who never sees it in their status.
 gocraft-cli
+gocraft-cli.exe
 
 # Where the release workflow stages its output.
 dist/

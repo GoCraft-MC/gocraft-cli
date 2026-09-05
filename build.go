@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +28,8 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	output := flags.String("o", "", "output path (default: <id>.gcpkg in the current directory)")
 	commands := flags.String("commands", "",
 		"command trees a compiler extracted, written into the bundle at the manifest's [commands] tree")
+	events := flags.String("events", "",
+		"event layouts a compiler extracted, merged into the manifest written into the bundle")
 	flags.Usage = func() {
 		fmt.Fprint(stderr, `Usage: gocraft-cli build [-o <file>.gcpkg] <dir>
 
@@ -36,6 +39,11 @@ host's own loader. A bundle that builds is a bundle that loads.
 With -commands, the trees an annotation processor extracted are encoded and
 added at the path the manifest's [commands] tree names. Executor ids are minted
 here: they belong to the tree, and nothing that ran earlier has to guess them.
+
+With -events, the layouts it extracted are appended to the manifest packed into
+the bundle, so the events a plugin defines are described by the classes the
+compiler saw rather than by a block the author kept in step by hand. A block
+they wrote themselves is refused rather than merged.
 
 Flags must come before the directory.
 `)
@@ -66,8 +74,13 @@ Flags must come before the directory.
 		fmt.Fprintln(stderr, err)
 		return exitFailure
 	}
+	merged, err := mergedManifest(directory, manifest, *events)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitFailure
+	}
 
-	written, err := writeBundle(directory, path, generated)
+	written, err := writeBundle(directory, path, generated, merged)
 	if err != nil {
 		os.Remove(path)
 		fmt.Fprintln(stderr, err)
@@ -142,7 +155,46 @@ func generatedEntries(manifest gcpkg.Manifest, commands string) (map[string][]by
 	return map[string][]byte{manifest.CommandTree: encoded}, nil
 }
 
-func writeBundle(directory, path string, generated map[string][]byte) ([]string, error) {
+// mergedManifest is the manifest the bundle carries, which is the author's plus
+// whatever the compiler extracted.
+//
+// Nil when there was nothing to add, and the file is packed as it is on disk.
+// The result is decoded here rather than only when the bundle is reopened, so a
+// merge that produced something the loader refuses is reported against the
+// merge rather than against the archive.
+func mergedManifest(directory string, declared gcpkg.Manifest, events string) ([]byte, error) {
+	if events == "" {
+		return nil, nil
+	}
+	layouts, err := readEventLayouts(events)
+	if err != nil {
+		return nil, err
+	}
+	source, err := os.ReadFile(filepath.Join(directory, gcpkg.ManifestFileName))
+	if err != nil {
+		return nil, err
+	}
+	merged, err := mergeEventLayouts(source, layouts, declared)
+	if err != nil {
+		return nil, err
+	}
+	if merged == nil {
+		return nil, nil
+	}
+	if _, err := gcpkg.DecodeManifest(bytes.NewReader(merged)); err != nil {
+		return nil, fmt.Errorf("merging the extracted event layouts produced a manifest "+
+			"the loader refuses: %w", err)
+	}
+	return merged, nil
+}
+
+// writeBundle packs the directory, plus what the build generated.
+//
+// manifest, when given, supersedes the plugin.toml on disk. It is the one file
+// allowed to do that: the merge exists precisely to change it, so the guard
+// below — which refuses a generated entry that would silently replace a source
+// file — would be refusing the thing that was asked for.
+func writeBundle(directory, path string, generated map[string][]byte, manifest []byte) ([]string, error) {
 	// Listed before the output file is created, so building into the source
 	// directory cannot pack the bundle into itself.
 	names, err := collectEntries(directory)
@@ -165,7 +217,9 @@ func writeBundle(directory, path string, generated map[string][]byte) ([]string,
 	archive := zip.NewWriter(file)
 	for _, name := range names {
 		var err error
-		if contents, ok := generated[name]; ok {
+		if manifest != nil && name == gcpkg.ManifestFileName {
+			err = packBytes(archive, name, manifest)
+		} else if contents, ok := generated[name]; ok {
 			err = packBytes(archive, name, contents)
 		} else {
 			err = packEntry(archive, directory, name)
