@@ -99,8 +99,10 @@ func mergeEventLayouts(source []byte, layouts eventLayouts, declared gcpkg.Manif
 			}
 		}
 	}
+	// Nothing to add, so nothing is rewritten: the caller packs the file as it
+	// is on disk rather than a byte-identical copy of it.
 	if len(layouts.Types) == 0 && len(layouts.Events) == 0 {
-		return source, nil
+		return nil, nil
 	}
 
 	var out strings.Builder

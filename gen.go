@@ -205,18 +205,23 @@ func writeGenerated(directory string, files map[string]string) ([]string, error)
 	return written, nil
 }
 
-// fieldsOf resolves one field list into what the emitters need: the parsed
-// type, and the record it names when it names one.
-func fieldsOf(manifest gcpkg.Manifest, fields []gcpkg.EventField) []resolved {
+// fieldsOf parses each field's declared type, which is what both emitters
+// switch on.
+func fieldsOf(fields []gcpkg.EventField) []resolved {
 	out := make([]resolved, 0, len(fields))
 	for _, field := range fields {
 		parsed, _ := gcpkg.ParseFieldType(field.Type)
-		out = append(out, resolved{EventField: field, Type: parsed})
+		out = append(out, resolved{EventField: field, Parsed: parsed})
 	}
 	return out
 }
 
+// resolved is one field and its parsed type.
+//
+// Parsed, not Type: EventField already has a Type, which is the string the
+// manifest carries. Two fields of that name in one struct means the embedded
+// one is only reachable spelled out, which is a trap rather than a shorthand.
 type resolved struct {
 	gcpkg.EventField
-	Type gcpkg.FieldType
+	Parsed gcpkg.FieldType
 }

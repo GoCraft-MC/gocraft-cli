@@ -116,8 +116,9 @@ func TestMergeRefusesABlockTheAuthorAlsoWrote(t *testing.T) {
 	}
 }
 
-// A plugin with no events at all leaves the manifest exactly as it was. Nothing
-// worse than a build that rewrites a file to add nothing.
+// A plugin with no events at all leaves the manifest alone: nil says there is
+// nothing to write, and the caller packs the file as it is on disk rather than
+// a byte-identical copy of it.
 func TestMergeLeavesAManifestWithNothingToAdd(t *testing.T) {
 	layouts, err := readEventLayouts(layoutFile(t, `{"version": 1}`))
 	if err != nil {
@@ -131,8 +132,8 @@ func TestMergeLeavesAManifestWithNothingToAdd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(merged) != shopManifest {
-		t.Fatalf("merged = %q, want the manifest untouched", merged)
+	if merged != nil {
+		t.Fatalf("merged = %q, want nil so the source file is packed as it is", merged)
 	}
 }
 

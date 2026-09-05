@@ -18,14 +18,14 @@ func generateJava(manifest gcpkg.Manifest, chosen names, pkg string) (map[string
 	files := map[string]string{}
 	for _, record := range manifest.Records {
 		name := chosen.records[record.Name]
-		fields := fieldsOf(manifest, record.Fields)
-		files[name+".java"] = javaValueClass(manifest, pkg, name, record.Name, fields)
+		fields := fieldsOf(record.Fields)
+		files[name+".java"] = javaValueClass(manifest, chosen, pkg, name, record.Name, fields)
 		files[name+"Values.java"] = javaRecordCodec(chosen, pkg, name, fields)
 	}
 	for _, event := range manifest.Provides {
 		name := chosen.events[event.Type]
-		fields := fieldsOf(manifest, event.Fields)
-		files[name+".java"] = javaValueClass(manifest, pkg, name, event.Type, fields)
+		fields := fieldsOf(event.Fields)
+		files[name+".java"] = javaValueClass(manifest, chosen, pkg, name, event.Type, fields)
 		files[name+"Layout.java"] = javaEventCodec(chosen, pkg, name, event, fields)
 	}
 	return files, nil
@@ -47,7 +47,7 @@ func javaHeader(out *lines, manifest gcpkg.Manifest, pkg string) {
 // No annotation: @PluginEvent is how an author declares an event they define,
 // and a subscriber defines nothing. The codec beside it is generated from the
 // same manifest, so there is nothing for a processor to derive.
-func javaValueClass(manifest gcpkg.Manifest, pkg, name, declared string,
+func javaValueClass(manifest gcpkg.Manifest, chosen names, pkg, name, declared string,
 	fields []resolved) string {
 	out := &lines{}
 	javaHeader(out, manifest, pkg)
@@ -60,17 +60,17 @@ func javaValueClass(manifest gcpkg.Manifest, pkg, name, declared string,
 		if !field.Mutable {
 			modifier = "private final"
 		}
-		out.add("    %s %s %s;", modifier, javaType(names{}, field.Type), field.Name)
+		out.add("    %s %s %s;", modifier, javaType(chosen, field.Parsed), field.Name)
 	}
 	out.blank()
-	out.add("    public %s(%s) {", name, javaSignature(fields))
+	out.add("    public %s(%s) {", name, javaSignature(chosen, fields))
 	for _, field := range fields {
 		out.add("        this.%s = %s;", field.Name, field.Name)
 	}
 	out.add("    }")
 	for _, field := range fields {
 		out.blank()
-		out.add("    public %s %s() {", javaType(names{}, field.Type), field.Name)
+		out.add("    public %s %s() {", javaType(chosen, field.Parsed), field.Name)
 		out.add("        return %s;", field.Name)
 		out.add("    }")
 		if !field.Mutable {
@@ -78,7 +78,7 @@ func javaValueClass(manifest gcpkg.Manifest, pkg, name, declared string,
 		}
 		out.blank()
 		out.add("    public void %s(%s %s) {", javaSetter(field.Name),
-			javaType(names{}, field.Type), field.Name)
+			javaType(chosen, field.Parsed), field.Name)
 		out.add("        this.%s = %s;", field.Name, field.Name)
 		out.add("    }")
 	}
@@ -86,10 +86,10 @@ func javaValueClass(manifest gcpkg.Manifest, pkg, name, declared string,
 	return out.String()
 }
 
-func javaSignature(fields []resolved) string {
+func javaSignature(chosen names, fields []resolved) string {
 	parts := make([]string, 0, len(fields))
 	for _, field := range fields {
-		parts = append(parts, javaType(names{}, field.Type)+" "+field.Name)
+		parts = append(parts, javaType(chosen, field.Parsed)+" "+field.Name)
 	}
 	return strings.Join(parts, ", ")
 }
@@ -98,10 +98,8 @@ func javaSetter(name string) string {
 	return "set" + strings.ToUpper(name[:1]) + name[1:]
 }
 
-// javaType is what the field holds, in Java. The names map is unused for now
-// and kept in the signature so a record naming another reads the same way here
-// as it does in the Go emitter.
-func javaType(_ names, parsed gcpkg.FieldType) string {
+// javaType is what the field holds, in Java.
+func javaType(chosen names, parsed gcpkg.FieldType) string {
 	element := ""
 	switch parsed.Element {
 	case gcpkg.ScalarBool:
@@ -117,7 +115,11 @@ func javaType(_ names, parsed gcpkg.FieldType) string {
 	case gcpkg.TypePlayerRef:
 		element = "fr.gocraft.api.PlayerRef"
 	default:
-		element = lastSegment(parsed.Element)
+		// From the table, not derived again: typeNames already capitalised it
+		// and checked it against every other name. Re-deriving here is how a
+		// record called fr.oreo.my-tier became MyTier in one emitter and
+		// my-tier in the other.
+		element = chosen.records[parsed.Element]
 	}
 	if parsed.List {
 		if element == "boolean" {
@@ -162,9 +164,6 @@ func javaRecordCodec(chosen names, pkg, name string, fields []resolved) string {
 	javaDecodeFields(out, chosen, fields, name, 2)
 	out.add("        return new %s(%s);", name, javaArguments(fields))
 	out.add("    }")
-	if fieldsCarryAPlayer(fields) {
-		javaPlayerHelper(out)
-	}
 	out.add("}")
 	return out.String()
 }
@@ -231,9 +230,6 @@ func javaEventCodec(chosen names, pkg, name string, event gcpkg.EventDefinition,
 	javaDecodeFields(out, chosen, fields, event.Type, 2)
 	out.add("        return new %s(%s);", name, javaArguments(fields))
 	out.add("    }")
-	if fieldsCarryAPlayer(fields) {
-		javaPlayerHelper(out)
-	}
 	out.add("}")
 	return out.String()
 }
@@ -255,26 +251,18 @@ func anyMutable(fields []resolved) bool {
 	return false
 }
 
-func fieldsCarryAPlayer(fields []resolved) bool {
-	for _, field := range fields {
-		if field.Type.Element == gcpkg.TypePlayerRef {
-			return true
-		}
-	}
-	return false
-}
-
 // javaEncodeFields leaves a local behind for every list, which the value list
 // below then names.
 func javaEncodeFields(out *lines, chosen names, fields []resolved, receiver string, depth int) {
 	tab := strings.Repeat("    ", depth)
 	for _, field := range fields {
-		if !field.Type.List {
+		if !field.Parsed.List {
 			continue
 		}
 		local := field.Name + "Values"
-		element := gcpkg.FieldType{Element: field.Type.Element, Record: field.Type.Record}
-		out.add("%sjava.util.List<Value> %s = new java.util.ArrayList<>();", tab, local)
+		element := gcpkg.FieldType{Element: field.Parsed.Element, Record: field.Parsed.Record}
+		out.add("%sjava.util.List<Value> %s = new java.util.ArrayList<>(%s%s().size());",
+			tab, local, receiver, field.Name)
 		out.add("%sfor (%s item : %s%s()) {", tab, javaType(chosen, element), receiver, field.Name)
 		out.add("%s    %s.add(%s);", tab, local, javaEncode(chosen, element, "item"))
 		out.add("%s}", tab)
@@ -288,11 +276,11 @@ func javaValueList(out *lines, chosen names, fields []resolved, receiver string,
 		if index+1 == len(fields) {
 			comma = ""
 		}
-		if field.Type.List {
+		if field.Parsed.List {
 			out.add("%snew Value.List(%sValues)%s", tab, field.Name, comma)
 			continue
 		}
-		out.add("%s%s%s", tab, javaEncode(chosen, field.Type, receiver+field.Name+"()"), comma)
+		out.add("%s%s%s", tab, javaEncode(chosen, field.Parsed, receiver+field.Name+"()"), comma)
 	}
 }
 
@@ -309,9 +297,12 @@ func javaEncode(chosen names, parsed gcpkg.FieldType, source string) string {
 	case gcpkg.ScalarBytes:
 		return "new Value.Bytes(" + source + ")"
 	case gcpkg.TypePlayerRef:
-		return "playerValue(" + source + ")"
+		// The handle knows its own wire shape. Writing it out here was a third
+		// copy of it, in a Go string, in another repository from the two Java
+		// ones — and it has to match what PlayerRef.of reads back.
+		return source + ".value()"
 	default:
-		return lastSegment(parsed.Element) + "Values.encode(" + source + ")"
+		return chosen.records[parsed.Element] + "Values.encode(" + source + ")"
 	}
 }
 
@@ -325,15 +316,15 @@ func javaDecodeFields(out *lines, chosen names, fields []resolved, where string,
 func javaDecodeOne(out *lines, chosen names, field resolved, index int, where string, depth int) {
 	tab := strings.Repeat("    ", depth)
 	value := fmt.Sprintf("fields.get(%d)", index)
-	if field.Type.List {
-		element := gcpkg.FieldType{Element: field.Type.Element, Record: field.Type.Record}
+	if field.Parsed.List {
+		element := gcpkg.FieldType{Element: field.Parsed.Element, Record: field.Parsed.Record}
 		raw := field.Name + "Raw"
 		out.add("%sif (!(%s instanceof Value.List(List<Value> %s))) {", tab, value, raw)
 		out.add("%s    throw new IllegalArgumentException(\"field %d of %s is not a list\");",
 			tab, index, where)
 		out.add("%s}", tab)
-		out.add("%s%s %s = new java.util.ArrayList<>();", tab, javaType(chosen, field.Type),
-			field.Name)
+		out.add("%s%s %s = new java.util.ArrayList<>(%s.size());", tab,
+			javaType(chosen, field.Parsed), field.Name, raw)
 		out.add("%sfor (Value item : %s) {", tab, raw)
 		javaDecodeValue(out, chosen, element, "item", field.Name+"Element",
 			fmt.Sprintf("an element of field %d of %s", index, where), depth+1)
@@ -341,7 +332,7 @@ func javaDecodeOne(out *lines, chosen names, field resolved, index int, where st
 		out.add("%s}", tab)
 		return
 	}
-	javaDecodeValue(out, chosen, field.Type, value, field.Name,
+	javaDecodeValue(out, chosen, field.Parsed, value, field.Name,
 		fmt.Sprintf("field %d of %s", index, where), depth)
 }
 
@@ -362,8 +353,8 @@ func javaDecodeValue(out *lines, chosen names, parsed gcpkg.FieldType,
 		out.add("%s}", tab)
 		out.add("%s%s %s = %s;", tab, carried, target, raw)
 	default:
-		out.add("%s%s %s = %sValues.decode(%s, sink);", tab, lastSegment(parsed.Element),
-			target, lastSegment(parsed.Element), value)
+		record := chosen.records[parsed.Element]
+		out.add("%s%s %s = %sValues.decode(%s, sink);", tab, record, target, record, value)
 	}
 }
 
@@ -381,24 +372,4 @@ func javaCarried(element string) (string, string) {
 	default:
 		return "Bytes", "byte[]"
 	}
-}
-
-// javaPlayerHelper writes the PlayerRef shape the host reads back, for the same
-// reason gocraft-apt does: the API jar a plugin compiles against deliberately
-// has no encoder, so that a plugin cannot reach the transport.
-func javaPlayerHelper(out *lines) {
-	out.blank()
-	out.add("    private static Value playerValue(fr.gocraft.api.PlayerRef player) {")
-	out.add("        java.nio.ByteBuffer uuid = java.nio.ByteBuffer.allocate(16);")
-	out.add("        uuid.putLong(player.uuid().getMostSignificantBits());")
-	out.add("        uuid.putLong(player.uuid().getLeastSignificantBits());")
-	out.add("        return new Value.List(List.of(")
-	out.add("                new Value.Bytes(uuid.array()),")
-	out.add("                new Value.Text(player.username()),")
-	out.add("                new Value.Text(switch (player.edition()) {")
-	out.add("                    case JAVA -> \"java\";")
-	out.add("                    case BEDROCK -> \"bedrock\";")
-	out.add("                    case UNKNOWN -> \"\";")
-	out.add("                })));")
-	out.add("    }")
 }

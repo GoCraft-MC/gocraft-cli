@@ -28,7 +28,7 @@ func generateGo(manifest gcpkg.Manifest, chosen names, pkg string) (map[string]s
 
 	for _, record := range manifest.Records {
 		name := chosen.records[record.Name]
-		fields := fieldsOf(manifest, record.Fields)
+		fields := fieldsOf(record.Fields)
 		out.blank()
 		out.add("// %s is the %s carried by an event of %s.", name, record.Name, manifest.ID)
 		writeGoStruct(out, chosen, name, fields)
@@ -48,7 +48,7 @@ func generateGo(manifest gcpkg.Manifest, chosen names, pkg string) (map[string]s
 		out.add("\t\treturn record, false")
 		out.add("\t}")
 		for index, field := range fields {
-			writeGoDecode(out, chosen, field.Type, fmt.Sprintf("value.List[%d]", index),
+			writeGoDecode(out, chosen, field.Parsed, fmt.Sprintf("value.List[%d]", index),
 				"record."+identifier(field.Name), 1)
 		}
 		out.add("\treturn record, true")
@@ -57,7 +57,7 @@ func generateGo(manifest gcpkg.Manifest, chosen names, pkg string) (map[string]s
 
 	for _, event := range manifest.Provides {
 		name := chosen.events[event.Type]
-		fields := fieldsOf(manifest, event.Fields)
+		fields := fieldsOf(event.Fields)
 		out.blank()
 		out.add("// %sType is the name %s publishes this event under.", name, manifest.ID)
 		out.add("const %sType = %q", name, event.Type)
@@ -117,7 +117,7 @@ func writeGoStruct(out *lines, chosen names, name string, fields []resolved) {
 		if !field.Mutable {
 			note = " // read-only: the provider declares it immutable"
 		}
-		out.add("\t%s %s%s", identifier(field.Name), goType(chosen, field.Type), note)
+		out.add("\t%s %s%s", identifier(field.Name), goType(chosen, field.Parsed), note)
 	}
 	out.add("}")
 }
@@ -126,12 +126,12 @@ func writeGoStruct(out *lines, chosen names, name string, fields []resolved) {
 // needs a loop and the value literal below needs an expression.
 func writeGoEncode(out *lines, chosen names, fields []resolved, receiver string) {
 	for _, field := range fields {
-		if !field.Type.List {
+		if !field.Parsed.List {
 			continue
 		}
 		local := lowerFirst(identifier(field.Name)) + "Values"
 		source := receiver + identifier(field.Name)
-		element := gcpkg.FieldType{Element: field.Type.Element, Record: field.Type.Record}
+		element := gcpkg.FieldType{Element: field.Parsed.Element, Record: field.Parsed.Record}
 		out.add("\t%s := make([]gocraft.Value, 0, len(%s))", local, source)
 		out.add("\tfor _, item := range %s {", source)
 		out.add("\t\t%s = append(%s, %s)", local, local, goEncode(chosen, element, "item"))
@@ -141,10 +141,10 @@ func writeGoEncode(out *lines, chosen names, fields []resolved, receiver string)
 
 // goValueOf is one field as an expression, using the local a list left behind.
 func goValueOf(chosen names, field resolved, receiver string) string {
-	if field.Type.List {
+	if field.Parsed.List {
 		return "gocraft.List(" + lowerFirst(identifier(field.Name)) + "Values...)"
 	}
-	return goEncode(chosen, field.Type, receiver+identifier(field.Name))
+	return goEncode(chosen, field.Parsed, receiver+identifier(field.Name))
 }
 
 // goType is what the field holds, in Go.
@@ -186,7 +186,7 @@ func goEncode(chosen names, parsed gcpkg.FieldType, source string) string {
 	case gcpkg.ScalarBytes:
 		return "gocraft.Bytes(" + source + ")"
 	case gcpkg.TypePlayerRef:
-		return "playerValue(" + source + ")"
+		return source + ".Value()"
 	default:
 		return source + ".value()"
 	}
@@ -207,7 +207,7 @@ func writeGoSetFields(out *lines, chosen names, name string, fields []resolved) 
 		if !field.Mutable {
 			continue
 		}
-		writeGoDecode(out, chosen, field.Type, fmt.Sprintf("fields[%d]", index),
+		writeGoDecode(out, chosen, field.Parsed, fmt.Sprintf("fields[%d]", index),
 			"e."+identifier(field.Name), 1)
 	}
 	out.add("\treturn nil")
@@ -234,14 +234,14 @@ func writeGoSubscribe(out *lines, chosen names, name string, fields []resolved) 
 	out.add("\t\tvar event %s", name)
 	for index, field := range fields {
 		target := "event." + identifier(field.Name)
-		if field.Type.Element == gcpkg.TypePlayerRef && !field.Type.List {
+		if field.Parsed.Element == gcpkg.TypePlayerRef && !field.Parsed.List {
 			out.add("\t\tif player, ok := dispatch.Player(%d); ok {", index)
 			out.add("\t\t\t%s = player", target)
 			out.add("\t\t}")
 			continue
 		}
 		out.add("\t\tif value, ok := dispatch.Field(%d); ok {", index)
-		writeGoDecode(out, chosen, field.Type, "value", target, 3)
+		writeGoDecode(out, chosen, field.Parsed, "value", target, 3)
 		out.add("\t\t}")
 	}
 	out.add("\t\thandler(&event, control)")
@@ -312,11 +312,13 @@ func carriesAPlayer(manifest gcpkg.Manifest) bool {
 	return false
 }
 
-// writeGoPlayerHelper writes the PlayerRef shape the host reads back.
+// writeGoPlayerHelper writes the decoder for a player nested inside a record.
 //
-// Unbound on the way in, deliberately: a handle read outside a dispatch has
-// nothing to act through. The subscribe helper reads the event's own player
-// from the dispatch instead, which is where one can be answered.
+// Encoding is PlayerRef.Value(), which the SDK owns. Decoding is still written
+// here because the SDK's reader takes the dispatch a handle acts through, and
+// that type is unexported — so a player read out of a record comes back
+// unbound. A subscriber reads its event's own player from the dispatch, where
+// one can be answered; this covers the nested case and says what it costs.
 func writeGoPlayerHelper(out *lines) {
 	out.blank()
 	out.add("func playerValue(player *gocraft.PlayerRef) gocraft.Value {")
