@@ -30,6 +30,8 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 		"command trees a compiler extracted, written into the bundle at the manifest's [commands] tree")
 	events := flags.String("events", "",
 		"event layouts a compiler extracted, merged into the manifest written into the bundle")
+	lock := flags.String("layout-lock", "",
+		"file recording the event layouts this plugin has published, compared and updated")
 	flags.Usage = func() {
 		fmt.Fprint(stderr, `Usage: gocraft-cli build [-o <file>.gcpkg] <dir>
 
@@ -44,6 +46,14 @@ With -events, the layouts it extracted are appended to the manifest packed into
 the bundle, so the events a plugin defines are described by the classes the
 compiler saw rather than by a block the author kept in step by hand. A block
 they wrote themselves is refused rather than merged.
+
+With -layout-lock, those layouts are compared against the file it names before
+anything is packed, and written back to it afterwards. Appending a field is
+allowed; reordering or removing one is refused, because the index is what the
+wire carries and every subscriber already compiled against the old one would
+read the wrong field. The file belongs in the project and is meant to be
+committed. It is named rather than derived because the packed directory may be
+a staging copy that its build system empties every run.
 
 Flags must come before the directory.
 `)
@@ -79,6 +89,14 @@ Flags must come before the directory.
 		fmt.Fprintln(stderr, err)
 		return exitFailure
 	}
+	// Before anything is written: a layout that drifted is a refusal about the
+	// plugin, not about the archive, and reporting it after packing would leave
+	// a bundle on disk that must not be published.
+	published, locked, err := layoutsToLock(*events, *lock)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitFailure
+	}
 
 	written, err := writeBundle(directory, path, generated, merged)
 	if err != nil {
@@ -97,6 +115,15 @@ Flags must come before the directory.
 		return exitFailure
 	}
 	describeBundle(stdout, path, bundle.Manifest, written)
+	// After the bundle, so a build that failed does not advance the record and
+	// let the next one through with a change nobody shipped.
+	if *lock != "" {
+		if err := writeLayoutLock(*lock, published); err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitFailure
+		}
+		fmt.Fprintln(stdout, describeLock(*lock, locked))
+	}
 	return exitOK
 }
 
@@ -153,6 +180,32 @@ func generatedEntries(manifest gcpkg.Manifest, commands string) (map[string][]by
 		return nil, err
 	}
 	return map[string][]byte{manifest.CommandTree: encoded}, nil
+}
+
+// layoutsToLock reads what the compiler extracted and checks it against the
+// record, reporting the layouts to write back and whether there was a record.
+//
+// Nothing to do without both flags. A build with no -events defines no events;
+// a build with no -layout-lock is one whose caller did not say where the
+// project is, which is the one-off case — the Gradle plugin always says.
+func layoutsToLock(events, lock string) (eventLayouts, bool, error) {
+	if events == "" || lock == "" {
+		return eventLayouts{}, false, nil
+	}
+	current, err := readEventLayouts(events)
+	if err != nil {
+		return eventLayouts{}, false, err
+	}
+	previous, locked, err := readLayoutLock(lock)
+	if err != nil {
+		return eventLayouts{}, false, err
+	}
+	if locked {
+		if err := checkLayoutDrift(previous, current); err != nil {
+			return eventLayouts{}, false, err
+		}
+	}
+	return current, locked, nil
 }
 
 // mergedManifest is the manifest the bundle carries, which is the author's plus
