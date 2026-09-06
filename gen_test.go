@@ -133,35 +133,6 @@ func TestGeneratedGoIsGofmtClean(t *testing.T) {
 	}
 }
 
-// The runtime warms a codec at load by decoding a payload of its own shape, so
-// the first real event of this type does not meet a cold decode while the tick
-// waits on it. Shaped, not empty: every decoder in the generated codec refuses
-// a kind it does not expect, so a blank of the wrong shape would warm the
-// refusal and leave the branch a real event takes interpreted.
-func TestGeneratedJavaCodecDescribesItsOwnShape(t *testing.T) {
-	manifest, chosen := provider(t)
-	files, err := generateJava(manifest, chosen, "gocraft.example.shop")
-	if err != nil {
-		t.Fatal(err)
-	}
-	layout := files["PurchaseLayout.java"]
-	for _, want := range []string{
-		"public List<Value> blank()",
-		// A player is the three values PlayerRef.of parses, never fewer.
-		`new Value.List(List.of(new Value.Bytes(new byte[16]), new Value.Text(""), new Value.Text("")))`,
-		// One element, so the loop reading the list runs a round.
-		"new Value.List(List.of(TierValues.blank()))",
-		"new Value.Decimal(0)",
-	} {
-		if !strings.Contains(layout, want) {
-			t.Fatalf("generateJava() wrote no %s:\n%s", want, layout)
-		}
-	}
-	if record := files["TierValues.java"]; !strings.Contains(record, "static Value blank()") {
-		t.Fatalf("a nested record cannot be warmed with its event:\n%s", record)
-	}
-}
-
 func TestGeneratedJavaCarriesTheWholeShape(t *testing.T) {
 	manifest, chosen := provider(t)
 	files, err := generateJava(manifest, chosen, "gocraft.example.shop")

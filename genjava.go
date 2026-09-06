@@ -164,12 +164,6 @@ func javaRecordCodec(chosen names, pkg, name string, fields []resolved) string {
 	javaDecodeFields(out, chosen, fields, name, 2)
 	out.add("        return new %s(%s);", name, javaArguments(fields))
 	out.add("    }")
-	out.blank()
-	out.add("    static Value blank() {")
-	out.add("        return new Value.List(List.of(")
-	javaBlankList(out, chosen, fields, 3)
-	out.add("        ));")
-	out.add("    }")
 	out.add("}")
 	return out.String()
 }
@@ -236,69 +230,8 @@ func javaEventCodec(chosen names, pkg, name string, event gcpkg.EventDefinition,
 	javaDecodeFields(out, chosen, fields, event.Type, 2)
 	out.add("        return new %s(%s);", name, javaArguments(fields))
 	out.add("    }")
-	out.blank()
-	out.add("    @Override")
-	out.add("    public List<Value> blank() {")
-	out.add("        return List.of(")
-	javaBlankList(out, chosen, fields, 3)
-	out.add("        );")
-	out.add("    }")
 	out.add("}")
 	return out.String()
-}
-
-// javaBlankList writes one placeholder value per field, in declaration order.
-//
-// It is what the runtime decodes at load so the first real event of this type
-// does not meet a cold codec while the tick waits on it. Every decoder above
-// refuses a kind it does not expect, so the shape has to be right or the
-// warm-up warms the refusal and leaves the real branch interpreted.
-func javaBlankList(out *lines, chosen names, fields []resolved, depth int) {
-	tab := strings.Repeat("    ", depth)
-	for index, field := range fields {
-		comma := ","
-		if index+1 == len(fields) {
-			comma = ""
-		}
-		out.add("%s%s%s", tab, javaBlank(chosen, field.Parsed), comma)
-	}
-}
-
-// javaBlank is one value of a field's shape carrying nothing.
-//
-// Shape and never content: an empty name, a zero, a player who is nobody. A
-// list gets exactly one element so the loop that reads it runs a round rather
-// than being skipped, which is the cost being paid here.
-func javaBlank(chosen names, parsed gcpkg.FieldType) string {
-	element := javaBlankElement(chosen, parsed.Element)
-	if parsed.List {
-		return "new Value.List(List.of(" + element + "))"
-	}
-	return element
-}
-
-func javaBlankElement(chosen names, element string) string {
-	switch element {
-	case gcpkg.ScalarBool:
-		return "new Value.Bool(false)"
-	case gcpkg.ScalarInt:
-		return "new Value.Int(0)"
-	case gcpkg.ScalarDouble:
-		return "new Value.Decimal(0)"
-	case gcpkg.ScalarString:
-		return "new Value.Text(\"\")"
-	case gcpkg.ScalarBytes:
-		return "new Value.Bytes(new byte[0])"
-	case gcpkg.TypePlayerRef:
-		// Sixteen bytes and two strings, the shape PlayerRef.of parses. It
-		// cannot be asked of the handle here the way encoding is: there is no
-		// handle yet, and building one to throw away would be the longer road
-		// to the same three values.
-		return "new Value.List(List.of(new Value.Bytes(new byte[16]), " +
-			"new Value.Text(\"\"), new Value.Text(\"\")))"
-	default:
-		return chosen.records[element] + "Values.blank()"
-	}
 }
 
 func javaArguments(fields []resolved) string {
