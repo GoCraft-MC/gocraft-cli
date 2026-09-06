@@ -121,15 +121,27 @@ func javaType(chosen names, parsed gcpkg.FieldType) string {
 		// my-tier in the other.
 		element = chosen.records[parsed.Element]
 	}
-	if parsed.List {
-		if element == "boolean" {
-			element = "Boolean"
-		} else if element == "long" {
-			element = "Long"
-		} else if element == "double" {
-			element = "Double"
+	if parsed.List || parsed.Map {
+		// A Java container cannot hold a primitive, so a scalar inside one is
+		// its box. A bare field stays primitive: it cannot be null, and that is
+		// the whole reason the wire tolerates it.
+		element = javaBoxed(element)
+		if parsed.Map {
+			return "java.util.Map<String, " + element + ">"
 		}
 		return "java.util.List<" + element + ">"
+	}
+	return element
+}
+
+func javaBoxed(element string) string {
+	switch element {
+	case "boolean":
+		return "Boolean"
+	case "long":
+		return "Long"
+	case "double":
+		return "Double"
 	}
 	return element
 }
@@ -251,19 +263,46 @@ func anyMutable(fields []resolved) bool {
 	return false
 }
 
-// javaEncodeFields leaves a local behind for every list, which the value list
-// below then names.
+// javaEncodeFields leaves a local behind for every list and every map, which
+// the value list below then names.
 func javaEncodeFields(out *lines, chosen names, fields []resolved, receiver string, depth int) {
 	tab := strings.Repeat("    ", depth)
 	for _, field := range fields {
-		if !field.Parsed.List {
+		if !field.Parsed.List && !field.Parsed.Map {
 			continue
 		}
 		local := field.Name + "Values"
 		element := gcpkg.FieldType{Element: field.Parsed.Element, Record: field.Parsed.Record}
+		boxed := javaBoxed(javaType(chosen, element))
+		if field.Parsed.Map {
+			// Sorted by key. The wire has no map, so this is a list of pairs —
+			// and a list has an order, which means an unsorted map serialises
+			// differently on two runs of the same event. A bundle is
+			// byte-reproducible and a mutation path addresses a position;
+			// neither survives an order that depends on a hash seed.
+			out.add("%sjava.util.List<Value> %s = new java.util.ArrayList<>(%s%s().size());",
+				tab, local, receiver, field.Name)
+			out.add("%sjava.util.List<String> %sKeys = new java.util.ArrayList<>(%s%s().keySet());",
+				tab, local, receiver, field.Name)
+			out.add("%sjava.util.Collections.sort(%sKeys);", tab, local)
+			out.add("%sfor (String key : %sKeys) {", tab, local)
+			out.add("%s    %s value = %s%s().get(key);", tab, boxed, receiver, field.Name)
+			out.add("%s    if (value == null) {", tab)
+			out.add("%s        throw new IllegalArgumentException("+
+				"\"a value of %s is null, and the wire has no null\");", tab, field.Name)
+			out.add("%s    }", tab)
+			out.add("%s    %s.add(new Value.List(List.of(new Value.Text(key), %s)));",
+				tab, local, javaEncode(chosen, element, "value"))
+			out.add("%s}", tab)
+			continue
+		}
 		out.add("%sjava.util.List<Value> %s = new java.util.ArrayList<>(%s%s().size());",
 			tab, local, receiver, field.Name)
-		out.add("%sfor (%s item : %s%s()) {", tab, javaType(chosen, element), receiver, field.Name)
+		out.add("%sfor (%s item : %s%s()) {", tab, boxed, receiver, field.Name)
+		out.add("%s    if (item == null) {", tab)
+		out.add("%s        throw new IllegalArgumentException("+
+			"\"an element of %s is null, and the wire has no null\");", tab, field.Name)
+		out.add("%s    }", tab)
 		out.add("%s    %s.add(%s);", tab, local, javaEncode(chosen, element, "item"))
 		out.add("%s}", tab)
 	}
@@ -276,7 +315,7 @@ func javaValueList(out *lines, chosen names, fields []resolved, receiver string,
 		if index+1 == len(fields) {
 			comma = ""
 		}
-		if field.Parsed.List {
+		if field.Parsed.List || field.Parsed.Map {
 			out.add("%snew Value.List(%sValues)%s", tab, field.Name, comma)
 			continue
 		}
@@ -329,6 +368,29 @@ func javaDecodeOne(out *lines, chosen names, field resolved, index int, where st
 		javaDecodeValue(out, chosen, element, "item", field.Name+"Element",
 			fmt.Sprintf("an element of field %d of %s", index, where), depth+1)
 		out.add("%s    %s.add(%sElement);", tab, field.Name, field.Name)
+		out.add("%s}", tab)
+		return
+	}
+	if field.Parsed.Map {
+		element := gcpkg.FieldType{Element: field.Parsed.Element, Record: field.Parsed.Record}
+		raw := field.Name + "Raw"
+		out.add("%sif (!(%s instanceof Value.List(List<Value> %s))) {", tab, value, raw)
+		out.add("%s    throw new IllegalArgumentException(\"field %d of %s is not a map\");",
+			tab, index, where)
+		out.add("%s}", tab)
+		// A LinkedHashMap, so iteration order is arrival order — which is
+		// sorted, because that is how the provider wrote it.
+		out.add("%s%s %s = new java.util.LinkedHashMap<>();", tab,
+			javaType(chosen, field.Parsed), field.Name)
+		out.add("%sfor (Value entry : %s) {", tab, raw)
+		out.add("%s    if (!(entry instanceof Value.List(List<Value> pair)) || pair.size() < 2", tab)
+		out.add("%s            || !(pair.get(0) instanceof Value.Text(String key))) {", tab)
+		out.add("%s        throw new IllegalArgumentException("+
+			"\"an entry of field %d of %s is not a key and a value\");", tab, index, where)
+		out.add("%s    }", tab)
+		javaDecodeValue(out, chosen, element, "pair.get(1)", field.Name+"Value",
+			fmt.Sprintf("a value of field %d of %s", index, where), depth+1)
+		out.add("%s    %s.put(key, %sValue);", tab, field.Name, field.Name)
 		out.add("%s}", tab)
 		return
 	}

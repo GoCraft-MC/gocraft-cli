@@ -26,6 +26,7 @@ cancellable = true
 fields = [
   { name = "buyer", type = "PlayerRef" },
   { name = "tiers", type = "[]gocraft.example.Tier" },
+  { name = "stock", type = "map[string]int", mutable = true },
   { name = "price", type = "double", mutable = true },
 ]
 `
@@ -171,5 +172,51 @@ func TestGeneratedJavaCarriesTheWholeShape(t *testing.T) {
 	}
 	if !strings.Contains(codec, "TierValues.decode(item, sink)") {
 		t.Fatalf("a record was not read through its own codec:\n%s", codec)
+	}
+}
+
+// §10 allows "List/Map of those". The wire has no map kind, so a map travels as
+// a list of key/value pairs — the shape the injected permission map and a
+// block's properties already take.
+//
+// Sorted by key, and that is not cosmetic. Go randomises map iteration on
+// purpose, so an unsorted map serialises differently on every emission; a
+// mutation path addresses a position and cannot survive that.
+func TestGeneratedCodeCarriesAMap(t *testing.T) {
+	manifest, chosen := provider(t)
+
+	goFiles, err := generateGo(manifest, chosen, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := goFiles["events.gen.go"]
+	for _, want := range []string{
+		"Stock map[string]int64",
+		"sort.Strings(",
+		`"sort"`,
+		"gocraft.List(gocraft.String(key)",
+	} {
+		if !strings.Contains(event, want) {
+			t.Fatalf("generateGo() wrote no %s:\n%s", want, event)
+		}
+	}
+
+	javaFiles, err := generateJava(manifest, chosen, "gocraft.example.shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := javaFiles["Purchase.java"]
+	if !strings.Contains(value, "java.util.Map<String, Long> stock") {
+		t.Fatalf("generateJava() gave a map no Java type:\n%s", value)
+	}
+	layout := javaFiles["PurchaseLayout.java"]
+	for _, want := range []string{
+		"java.util.Collections.sort(",
+		"new java.util.LinkedHashMap<>()",
+		"is null, and the wire has no null",
+	} {
+		if !strings.Contains(layout, want) {
+			t.Fatalf("generateJava() wrote no %s:\n%s", want, layout)
+		}
 	}
 }

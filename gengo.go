@@ -24,7 +24,17 @@ func generateGo(manifest gcpkg.Manifest, chosen names, pkg string) (map[string]s
 	out.add("// moved, which is the one thing a positional payload never can.")
 	out.add("package %s", pkg)
 	out.blank()
-	out.add("import gocraft \"github.com/GoCraft-MC/gocraft-api-go\"")
+	// sort only when something needs it: a map is written as a sorted list of
+	// pairs, and an unused import does not compile.
+	if manifestCarriesAMap(manifest) {
+		out.add("import (")
+		out.add("	\"sort\"")
+		out.blank()
+		out.add("	gocraft \"github.com/GoCraft-MC/gocraft-api-go\"")
+		out.add(")")
+	} else {
+		out.add("import gocraft \"github.com/GoCraft-MC/gocraft-api-go\"")
+	}
 
 	for _, record := range manifest.Records {
 		name := chosen.records[record.Name]
@@ -110,6 +120,30 @@ func (l *lines) blank() { l.out.WriteString("\n") }
 
 func (l *lines) String() string { return l.out.String() }
 
+// manifestCarriesAMap reports whether anything this manifest declares holds a
+// map, which is the only reason the generated file needs sort.
+func manifestCarriesAMap(manifest gcpkg.Manifest) bool {
+	declared := func(fields []gcpkg.EventField) bool {
+		for _, field := range fields {
+			if parsed, ok := gcpkg.ParseFieldType(field.Type); ok && parsed.Map {
+				return true
+			}
+		}
+		return false
+	}
+	for _, record := range manifest.Records {
+		if declared(record.Fields) {
+			return true
+		}
+	}
+	for _, event := range manifest.Provides {
+		if declared(event.Fields) {
+			return true
+		}
+	}
+	return false
+}
+
 func writeGoStruct(out *lines, chosen names, name string, fields []resolved) {
 	out.add("type %s struct {", name)
 	for _, field := range fields {
@@ -122,26 +156,43 @@ func writeGoStruct(out *lines, chosen names, name string, fields []resolved) {
 	out.add("}")
 }
 
-// writeGoEncode leaves a local behind for every list field, because a list
-// needs a loop and the value literal below needs an expression.
+// writeGoEncode leaves a local behind for every list and every map field,
+// because both need a loop and the value literal below needs an expression.
 func writeGoEncode(out *lines, chosen names, fields []resolved, receiver string) {
 	for _, field := range fields {
-		if !field.Parsed.List {
+		if !field.Parsed.List && !field.Parsed.Map {
 			continue
 		}
 		local := lowerFirst(identifier(field.Name)) + "Values"
 		source := receiver + identifier(field.Name)
 		element := gcpkg.FieldType{Element: field.Parsed.Element, Record: field.Parsed.Record}
-		out.add("\t%s := make([]gocraft.Value, 0, len(%s))", local, source)
-		out.add("\tfor _, item := range %s {", source)
-		out.add("\t\t%s = append(%s, %s)", local, local, goEncode(chosen, element, "item"))
-		out.add("\t}")
+		out.add("	%s := make([]gocraft.Value, 0, len(%s))", local, source)
+		if field.Parsed.Map {
+			// Sorted by key. The wire has no map, so this is a list of pairs,
+			// and a list has an order — Go randomises map iteration on purpose,
+			// so an unsorted map would serialise differently on every emission.
+			// A mutation path addresses a position and cannot survive that.
+			keys := local + "Keys"
+			out.add("	%s := make([]string, 0, len(%s))", keys, source)
+			out.add("	for key := range %s {", source)
+			out.add("		%s = append(%s, key)", keys, keys)
+			out.add("	}")
+			out.add("	sort.Strings(%s)", keys)
+			out.add("	for _, key := range %s {", keys)
+			out.add("		%s = append(%s, gocraft.List(gocraft.String(key), %s))",
+				local, local, goEncode(chosen, element, source+"[key]"))
+			out.add("	}")
+			continue
+		}
+		out.add("	for _, item := range %s {", source)
+		out.add("		%s = append(%s, %s)", local, local, goEncode(chosen, element, "item"))
+		out.add("	}")
 	}
 }
 
 // goValueOf is one field as an expression, using the local a list left behind.
 func goValueOf(chosen names, field resolved, receiver string) string {
-	if field.Parsed.List {
+	if field.Parsed.List || field.Parsed.Map {
 		return "gocraft.List(" + lowerFirst(identifier(field.Name)) + "Values...)"
 	}
 	return goEncode(chosen, field.Parsed, receiver+identifier(field.Name))
@@ -166,8 +217,11 @@ func goType(chosen names, parsed gcpkg.FieldType) string {
 	default:
 		element = chosen.records[parsed.Element]
 	}
-	if parsed.List {
+	switch {
+	case parsed.List:
 		return "[]" + element
+	case parsed.Map:
+		return "map[string]" + element
 	}
 	return element
 }
@@ -269,6 +323,22 @@ func writeGoDecode(out *lines, chosen names, parsed gcpkg.FieldType,
 		out.add("%s\tvar element %s", tab, goType(chosen, element))
 		writeGoDecode(out, chosen, element, "item", "element", depth+1)
 		out.add("%s\t%s = append(%s, element)", tab, target, target)
+		out.add("%s}", tab)
+		return
+	}
+	if parsed.Map {
+		element := gcpkg.FieldType{Element: parsed.Element, Record: parsed.Record}
+		out.add("%s%s = make(%s, len(%s.List))", tab, target, goType(chosen, parsed), value)
+		out.add("%sfor _, entry := range %s.List {", tab, value)
+		// An entry that is not a pair is skipped rather than fatal: the payload
+		// came from another plugin, and one malformed entry must not lose the
+		// rest of a map the host already accepted.
+		out.add("%s	if len(entry.List) < 2 {", tab)
+		out.add("%s		continue", tab)
+		out.add("%s	}", tab)
+		out.add("%s	var element %s", tab, goType(chosen, element))
+		writeGoDecode(out, chosen, element, "entry.List[1]", "element", depth+1)
+		out.add("%s	%s[entry.List[0].String] = element", tab, target)
 		out.add("%s}", tab)
 		return
 	}
