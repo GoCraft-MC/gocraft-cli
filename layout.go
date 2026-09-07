@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/GoCraft-MC/gocraft-abi/gcpkg"
 )
 
 // The layout lock: what this plugin's events looked like the last time it was
@@ -35,9 +37,17 @@ import (
 // The same JSON the annotation processor writes, so there is one description of
 // a layout and no second decoder to keep in step. It is meant to be committed —
 // it is the record of what this plugin has already published.
+//
+// What it locks is every layout the build publishes, from wherever that layout
+// was declared. A compiler dump is one source and the manifest is the other: a
+// runtime with no seam into its compiler — a Go plugin has none — declares
+// [[events.provides]] in plugin.toml, and that block is the layout as surely as
+// a dump is. Covering only the dump would have covered exactly the producers
+// whose layout a machine wrote, and left uncovered the ones written out by hand,
+// where two lines are easiest to swap and nothing recompiles to notice.
 
-// checkLayoutDrift compares what the compiler just extracted against what the
-// last build recorded.
+// checkLayoutDrift compares what this build publishes against what the last one
+// recorded.
 //
 // Appending is allowed and everything else is refused, which is §03's additive
 // rule one level down. Both directions of a removal count: a field that is gone
@@ -104,6 +114,47 @@ func checkFieldDrift(what string, was, now []layoutField) error {
 	return nil
 }
 
+// manifestLayouts reads the layouts an author declared in plugin.toml.
+//
+// The manifest block and a compiler dump describe the same thing, so they are
+// compared as the same thing. This is the whole of the conversion: the lock's
+// shape and the manifest's are the same four facts, which is not a coincidence
+// — the dump exists to be turned into that block.
+func manifestLayouts(declared gcpkg.Manifest) eventLayouts {
+	layouts := eventLayouts{Version: layoutVersion}
+	for _, record := range declared.Records {
+		layouts.Types = append(layouts.Types, layoutRecord{
+			Name: record.Name, Fields: manifestFields(record.Fields),
+		})
+	}
+	for _, event := range declared.Provides {
+		layouts.Events = append(layouts.Events, layoutEvent{
+			Type: event.Type, Cancellable: event.Cancellable,
+			FailClosed: event.FailClosed, Fields: manifestFields(event.Fields),
+		})
+	}
+	return layouts
+}
+
+func manifestFields(declared []gcpkg.EventField) []layoutField {
+	fields := make([]layoutField, 0, len(declared))
+	for _, field := range declared {
+		fields = append(fields, layoutField{
+			Name: field.Name, Type: field.Type, Mutable: field.Mutable,
+		})
+	}
+	return fields
+}
+
+// publishes reports whether this build has any layout to record.
+//
+// A plugin that defines no event publishes none, and no file is written for it:
+// a lock recording nothing would be a file in every project, saying nothing, and
+// an author would learn to ignore the one that does say something.
+func (l eventLayouts) publishes() bool {
+	return len(l.Types) > 0 || len(l.Events) > 0
+}
+
 // readLayoutLock reads the recorded layout, reporting whether there was one.
 //
 // A missing file is the first build of a plugin that has never published
@@ -135,10 +186,13 @@ func readLayoutLock(path string) (eventLayouts, bool, error) {
 // indented, because it is a file a human reads in a diff — a reordering that
 // shows up as a whole-file change tells a reviewer nothing.
 func writeLayoutLock(path string, layouts eventLayouts) error {
+	// Empty rather than absent, so a plugin that declares no record writes []
+	// and not null. It is a committed file read in diffs, and two builds of the
+	// same project should not differ by which of those a nil slice encodes to.
 	recorded := eventLayouts{
 		Version: layoutVersion,
-		Types:   append([]layoutRecord(nil), layouts.Types...),
-		Events:  append([]layoutEvent(nil), layouts.Events...),
+		Types:   append(make([]layoutRecord, 0, len(layouts.Types)), layouts.Types...),
+		Events:  append(make([]layoutEvent, 0, len(layouts.Events)), layouts.Events...),
 	}
 	sort.Slice(recorded.Types, func(i, j int) bool {
 		return recorded.Types[i].Name < recorded.Types[j].Name

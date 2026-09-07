@@ -9,7 +9,12 @@ import (
 	"github.com/GoCraft-MC/gocraft-abi/gcpkg"
 )
 
-// eventLayouts is what a compiler extracted about the events a plugin defines.
+// eventLayouts is what a plugin publishes about the events it defines.
+//
+// Two things fill it. A compiler that extracted them — the case below — and the
+// author's own [[events.provides]], for a runtime whose compiler has no seam to
+// hook into. Both are read into this one shape, because the lock compares them
+// as one thing and they describe one thing.
 //
 // §10 says the manifest block is derived, and this is the half that derives it:
 // an annotation processor sees the classes, and only it knows that the second
