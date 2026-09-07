@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoCraft-MC/gocraft-abi/gcpkg"
 )
 
 // §10's purchase event, as a compiler would have dumped it.
@@ -110,6 +112,110 @@ func TestAReorderedRecordIsRefused(t *testing.T) {
 
 	if err := checkLayoutDrift(publishedLayouts(), current); err == nil {
 		t.Fatal("checkLayoutDrift() accepted a record's fields being swapped")
+	}
+}
+
+// A layout declared by hand is a layout, and it is locked like any other.
+//
+// The manifest block and a compiler dump say the same four things about a
+// field, so the conversion is checked for saying them rather than for its
+// shape: what a Go plugin writes in plugin.toml has to arrive in the record the
+// next build compares against.
+func TestAManifestDeclaresALayout(t *testing.T) {
+	layouts := manifestLayouts(gcpkg.Manifest{
+		Records: []gcpkg.EventRecord{{Name: "fr.oreo.Tier", Fields: []gcpkg.EventField{
+			{Name: "label", Type: "string"},
+			{Name: "price", Type: "double", Mutable: true},
+		}}},
+		Provides: []gcpkg.EventDefinition{{
+			Type: "fr.oreo.shop/purchase", Cancellable: true,
+			Fields: []gcpkg.EventField{
+				{Name: "buyer", Type: "PlayerRef"},
+				{Name: "tiers", Type: "[]fr.oreo.Tier"},
+				{Name: "price", Type: "double", Mutable: true},
+			},
+		}},
+	})
+	if err := checkLayoutDrift(publishedLayouts(), layouts); err != nil {
+		t.Fatalf("manifestLayouts() did not reproduce the same layout: %v", err)
+	}
+	if err := checkLayoutDrift(layouts, publishedLayouts()); err != nil {
+		t.Fatalf("manifestLayouts() did not reproduce the same layout: %v", err)
+	}
+}
+
+// The hole this fix closes, end to end and in the direction it was open.
+//
+// A Go plugin has no annotation processor, so it declares its events in
+// plugin.toml and the build was handed no dump. Every check below therefore did
+// nothing at all, and swapping two lines of that block shipped — while the same
+// swap in an annotated Java class was refused. It is the half where a swap is
+// easiest and where nothing recompiles to notice.
+func TestAHandDeclaredLayoutIsRefusedWhenItReorders(t *testing.T) {
+	const header = `id = "fr.oreo.shop"
+version = "1.0.0"
+api = 1
+runtime = "go"
+entry = "bin/shop"
+`
+	const published = header + `
+[[events.provides]]
+type = "fr.oreo.shop/purchase"
+fields = [
+  { name = "buyer", type = "PlayerRef" },
+  { name = "price", type = "double", mutable = true },
+]
+`
+	const reordered = header + `
+[[events.provides]]
+type = "fr.oreo.shop/purchase"
+fields = [
+  { name = "price", type = "double", mutable = true },
+  { name = "buyer", type = "PlayerRef" },
+]
+`
+	directory := t.TempDir()
+	lock := filepath.Join(directory, layoutLockName)
+	source := filepath.Join(directory, "src")
+	writeFile(t, filepath.Join(source, gcpkg.ManifestFileName), published)
+
+	bundle := filepath.Join(directory, "shop.gcpkg")
+	if _, _, code := runCLI("build", "-o", bundle, "-layout-lock", lock, source); code != exitOK {
+		t.Fatalf("the first build of a hand-declared plugin failed with %d", code)
+	}
+	if _, locked, err := readLayoutLock(lock); err != nil || !locked {
+		t.Fatalf("a hand-declared layout was not recorded: locked=%v err=%v", locked, err)
+	}
+
+	writeFile(t, filepath.Join(source, gcpkg.ManifestFileName), reordered)
+	_, stderr, code := runCLI("build", "-o", bundle, "-layout-lock", lock, source)
+	if code == exitOK {
+		t.Fatal("build accepted two fields of a hand-declared event being swapped")
+	}
+	if !strings.Contains(stderr, "field 0") {
+		t.Fatalf("build refused without naming the index: %s", stderr)
+	}
+}
+
+// A plugin that defines no event publishes no layout, and gets no file. It used
+// to get one recording nothing — which an author asking for the protection
+// would have committed, and been protected by not at all.
+func TestAPluginWithNoEventsIsGivenNoLock(t *testing.T) {
+	directory := t.TempDir()
+	lock := filepath.Join(directory, layoutLockName)
+	source := filepath.Join(directory, "src")
+	writeFile(t, filepath.Join(source, gcpkg.ManifestFileName), `id = "fr.oreo.quiet"
+version = "1.0.0"
+api = 1
+runtime = "go"
+entry = "bin/quiet"
+`)
+	if _, _, code := runCLI("build", "-o", filepath.Join(directory, "quiet.gcpkg"),
+		"-layout-lock", lock, source); code != exitOK {
+		t.Fatalf("build failed with %d", code)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatalf("a plugin with no events was given a lock file: %v", err)
 	}
 }
 
