@@ -134,7 +134,11 @@ Flags must come before the directory.
 
 // collectEntries lists the files to pack, as slash-separated paths relative to
 // the source directory. Names beginning with a dot are skipped at every level:
-// .git, .idea and editor droppings have no business inside a bundle.
+// .git, .idea and editor droppings have no business inside a bundle. So are
+// .gcpkg files: one in the source directory is a previous build's output, and
+// packing it would at best double the bundle — at worst it is the output being
+// written right now, truncated by os.Create and then read while the archive
+// grows under the reader, which never reaches EOF.
 func collectEntries(directory string) ([]string, error) {
 	var names []string
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
@@ -151,6 +155,9 @@ func collectEntries(directory string) ([]string, error) {
 			return nil
 		}
 		if entry.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(entry.Name(), ".gcpkg") {
 			return nil
 		}
 		relative, err := filepath.Rel(directory, path)
@@ -271,7 +278,9 @@ func mergedManifest(directory string, declared gcpkg.Manifest, events string) ([
 // file — would be refusing the thing that was asked for.
 func writeBundle(directory, path string, generated map[string][]byte, manifest []byte) ([]string, error) {
 	// Listed before the output file is created, so building into the source
-	// directory cannot pack the bundle into itself.
+	// directory cannot pack the bundle into itself — and with .gcpkg names
+	// skipped in the walk, because on a rebuild the previous output is already
+	// there and listing order alone cannot keep it out.
 	names, err := collectEntries(directory)
 	if err != nil {
 		return nil, err
