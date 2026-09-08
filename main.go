@@ -45,6 +45,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return buildCommand(args[1:], stdout, stderr)
 	case "validate":
 		return validateCommand(args[1:], stdout, stderr)
+	case "gen":
+		return genCommand(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, "gocraft-cli", version)
 		return exitOK
@@ -67,6 +69,7 @@ Usage:
 Commands:
   build <dir>      Pack a plugin source directory into a .gcpkg bundle
   validate <dir>   Check the plugin.toml of a plugin source directory
+  gen <bundle>     Write the event types of a plugin you subscribe to
   version          Print the tool version
   help             Print this message
 `)

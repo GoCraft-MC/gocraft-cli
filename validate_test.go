@@ -13,8 +13,9 @@ api = 1
 runtime = "jvm"
 entry = "fr.oreo.hello.HelloPlugin"
 
-[subscribe]
-events = ["block.break"]
+[[subscribe]]
+event = "block.break"
+priority = "high"
 perms = ["hello.notify"]
 `
 
@@ -72,7 +73,7 @@ func TestValidateQualifiesUnknownFieldsInsideATable(t *testing.T) {
 	if code != exitFailure {
 		t.Fatalf("validate = %d, want %d", code, exitFailure)
 	}
-	if !strings.Contains(stderr, `plugin.toml:10: unknown field "subscribe.description"`) {
+	if !strings.Contains(stderr, `plugin.toml:11: unknown field "subscribe.description"`) {
 		t.Fatalf("stderr = %q", stderr)
 	}
 }
