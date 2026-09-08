@@ -99,6 +99,35 @@ func TestBuildSkipsDotEntries(t *testing.T) {
 	}
 }
 
+// The rebuild is the case that matters: the previous output sits in the
+// directory being packed. Before the walk skipped .gcpkg names, that file was
+// listed, truncated by os.Create, and then read while the new archive grew
+// under the reader — which never reached EOF.
+func TestBuildSkipsAStaleBundle(t *testing.T) {
+	source := writeSource(t, sourceManifest)
+	output := filepath.Join(source, "out.gcpkg")
+	if _, stderr, code := runCLI("build", "-o", output, source); code != exitOK {
+		t.Fatalf("build = %d (%s)", code, stderr)
+	}
+	first, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, code := runCLI("build", "-o", output, source); code != exitOK {
+		t.Fatalf("rebuild = %d (%s)", code, stderr)
+	}
+	second, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("rebuilding over a stale bundle produced different bytes")
+	}
+	if names := archiveNames(t, output); len(names) != 1 || names[0] != "plugin.toml" {
+		t.Fatalf("archive entries = %v, want [plugin.toml]", names)
+	}
+}
+
 func TestBuildKeepsNestedFilesWithSlashPaths(t *testing.T) {
 	source := writeSource(t, sourceManifest)
 	if err := os.MkdirAll(filepath.Join(source, "lib"), 0o755); err != nil {
